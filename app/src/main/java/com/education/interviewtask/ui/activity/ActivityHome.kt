@@ -27,6 +27,9 @@ class ActivityHome : SuperActivity() {
     private lateinit var adapterProducts: AdapterProducts
     private var page = 0
     private var isLoading = false
+    private var hasMoreData = true
+    private val productsList = ArrayList<Product>()
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -38,37 +41,37 @@ class ActivityHome : SuperActivity() {
             insets
         }
         initViews()
+        setupObservers()
     }
 
-    private fun initViews(){
+    private fun initViews() {
         productViewModel = ViewModelProvider(this)[ProductViewModel::class.java]
-        adapterProducts = AdapterProducts(this, emptyList(),handler)
-        binding.ProductsList.layoutManager = LinearLayoutManager(this, LinearLayoutManager.VERTICAL, false)
-        binding.ProductsList.adapter = adapterProducts
-        binding.ProductsList.addOnScrollListener(mListener)
-        binding.ProductsList.visibility = View.GONE
-        loadProducts(0)
+        adapterProducts = AdapterProducts(this, productsList, handler)
+        binding.ProductsList.apply {
+            layoutManager = LinearLayoutManager(this@ActivityHome, LinearLayoutManager.VERTICAL, false)
+            adapter = adapterProducts
+            addOnScrollListener(mListener)
+            visibility = View.GONE
+        }
+        loadProducts()
     }
 
-    private fun loadProducts(skip: Int) {
-        if (isNetworkAvailable(this)){
-            showLoadingDialog()
-            binding.loading.visibility = View.VISIBLE
-            isLoading = true
-            productViewModel.fetchProducts(Constants.PAGE_LIMIT, skip)
-        }else{
-            showToast("No Internet Connection")
-        }
-
-        productViewModel.products.observe(this) {jsonObjects ->
+    private fun setupObservers() {
+        productViewModel.products.observe(this) { jsonObjects ->
             binding.ProductsList.visibility = View.VISIBLE
             hideLoadingDialog()
             binding.loading.visibility = View.GONE
             isLoading = false
+
             val productsArray = jsonObjects.getJSONArray("products")
+            // Check if we've reached the end of available data
+            if (productsArray.length() < Constants.PAGE_LIMIT) {
+                hasMoreData = false
+            }
             processProducts(productsArray)
             page++
         }
+
         productViewModel.error.observe(this) { errorMessage ->
             hideLoadingDialog()
             binding.loading.visibility = View.GONE
@@ -76,38 +79,60 @@ class ActivityHome : SuperActivity() {
             showToast(errorMessage)
         }
     }
-    private fun processProducts(productsArray: JSONArray) {
-        try {
-            val list = ArrayList<Product>()
-            for (i in 0 until productsArray.length()) {
-                val productObject = productsArray.getJSONObject(i)
-                val id = productObject.getInt("id")
-                val title = productObject.getString("title")
-                val description = productObject.getString("description")
-                val price = productObject.getDouble("price")
-                val discountPercentage = productObject.getDouble("discountPercentage")
-                val rating = productObject.getDouble("rating")
-                val stock = productObject.getInt("stock")
-                val brand = productObject.getString("brand")
-                val category = productObject.getString("category")
-                val thumbnail = productObject.getString("thumbnail")
-                val images = productObject.getJSONArray("images")
-                val imageList = ArrayList<String>()
-                for (j in 0 until images.length()) {
-                    imageList.add(images.getString(j))
-                }
-                val productsList = Product(id, title, description, price, discountPercentage, rating, stock, brand, category, thumbnail, imageList)
-                list.add(productsList)
-                adapterProducts.setProductsList(list)
-            }
-        } catch (e: Exception) {
-            Log.e("HomeActivity", e.message.toString() )
+
+    private fun loadProducts() {
+        if (!isNetworkAvailable(this)) {
+            showToast("No Internet Connection")
+            return
         }
 
+        if (isLoading || !hasMoreData) {
+            return
+        }
+
+        showLoadingDialog()
+        binding.loading.visibility = View.VISIBLE
+        isLoading = true
+        productViewModel.fetchProducts(Constants.PAGE_LIMIT, page * Constants.PAGE_LIMIT)
     }
-    private val handler = Handler(Looper.getMainLooper()){msg->
-        when(msg.what){
-            100 ->{
+
+    private fun processProducts(productsArray: JSONArray) {
+        try {
+            val newProducts = ArrayList<Product>()
+            for (i in 0 until productsArray.length()) {
+                val productObject = productsArray.getJSONObject(i)
+                val product = Product(
+                    id = productObject.getInt("id"),
+                    title = productObject.getString("title"),
+                    description = productObject.getString("description"),
+                    price = productObject.getDouble("price"),
+                    discountPercentage = productObject.getDouble("discountPercentage"),
+                    rating = productObject.getDouble("rating"),
+                    stock = productObject.getInt("stock"),
+                    brand = "",
+                    category = productObject.getString("category"),
+                    thumbnail = productObject.getString("thumbnail"),
+                    images = ArrayList<String>().apply {
+                        val images = productObject.getJSONArray("images")
+                        for (j in 0 until images.length()) {
+                            add(images.getString(j))
+                        }
+                    }
+                )
+                newProducts.add(product)
+            }
+
+            // Append new products to existing list
+            productsList.addAll(newProducts)
+            adapterProducts.notifyItemRangeInserted(productsList.size - newProducts.size, newProducts.size)
+        } catch (e: Exception) {
+            Log.e("HomeActivity", "Error processing products: ${e.message}", e)
+        }
+    }
+
+    private val handler = Handler(Looper.getMainLooper()) { msg ->
+        when (msg.what) {
+            100 -> {
                 val product = msg.obj as Product
                 val intent = Intent(this, ActivityProductDetail::class.java)
                 intent.putExtra("id", product.id)
@@ -116,14 +141,17 @@ class ActivityHome : SuperActivity() {
         }
         true
     }
-    private val mListener: RecyclerView.OnScrollListener =
-        object : RecyclerView.OnScrollListener() {
-            override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
-                super.onScrollStateChanged(recyclerView, newState)
-                if (!recyclerView.canScrollVertically(1) && newState == RecyclerView.SCROLL_STATE_IDLE) {
-                    loadProducts(page * Constants.PAGE_LIMIT)
-                }
+
+    private val mListener = object : RecyclerView.OnScrollListener() {
+        override fun onScrollStateChanged(recyclerView: RecyclerView, newState: Int) {
+            super.onScrollStateChanged(recyclerView, newState)
+            if (!recyclerView.canScrollVertically(1) &&
+                newState == RecyclerView.SCROLL_STATE_IDLE &&
+                !isLoading &&
+                hasMoreData
+            ) {
+                loadProducts()
             }
         }
-
+    }
 }
